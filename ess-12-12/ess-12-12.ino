@@ -57,6 +57,7 @@ unsigned long resetTimeWindow = 4000;
 void loadCredentials() {
   prefs.begin("wifi", true);
   lastGoodWiFiIndex = prefs.getUChar("lastgood", 0);
+  bool hasSlotProfiles = false;
   for (uint8_t i = 0; i < MAX_WIFI_NETWORKS; i++) {
     String validKey = "valid" + String(i);
     String ssidKey = "ssid" + String(i);
@@ -68,9 +69,29 @@ void loadCredentials() {
       wifiValid[i] = false;
       storedSSID[i] = "";
       storedPASS[i] = "";
+    } else {
+      hasSlotProfiles = true;
+    }
+  }
+
+  // Backward-compatibility: migrate legacy single-profile keys.
+  if (!hasSlotProfiles) {
+    String legacySSID = prefs.getString("ssid", "");
+    String legacyPASS = prefs.getString("pass", "");
+    legacySSID.trim();
+    if (legacySSID.length() > 0) {
+      wifiValid[0] = true;
+      storedSSID[0] = legacySSID;
+      storedPASS[0] = legacyPASS;
+      lastGoodWiFiIndex = 0;
     }
   }
   prefs.end();
+
+  if (!hasSlotProfiles && wifiValid[0]) {
+    saveWiFiStore();
+    Serial.println("Migrated legacy WiFi credentials to slot 0.");
+  }
 
   Serial.println("Loaded WiFi profiles:");
   for (uint8_t i = 0; i < MAX_WIFI_NETWORKS; i++) {
