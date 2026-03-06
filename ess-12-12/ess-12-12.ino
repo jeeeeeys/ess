@@ -34,13 +34,21 @@
 Preferences prefs;
 WebServer server(80);
 
-String storedSSID = "";
-String storedPASS = "";
+const uint8_t MAX_WIFI_NETWORKS = 5;
+const uint8_t WIFI_MAX_RETRIES = 3;
+
+String storedSSID[MAX_WIFI_NETWORKS];
+String storedPASS[MAX_WIFI_NETWORKS];
+bool wifiValid[MAX_WIFI_NETWORKS];
+uint8_t lastGoodWiFiIndex = 0;
+
 bool forceConfig = false;
 bool inConfigPortal = false;
+bool blynkOtaInitialized = false;
 
 unsigned long lastConnectAttempt = 0;
-const unsigned long connectRetryInterval = 5000;
+const unsigned long connectRetryInterval = 10000;
+uint8_t wifiFailCount = 0;
 
 RTC_DATA_ATTR int bootCount = 0;
 unsigned long resetTimeWindow = 4000;
@@ -48,39 +56,113 @@ unsigned long resetTimeWindow = 4000;
 // -------- Load saved credentials --------
 void loadCredentials() {
   prefs.begin("wifi", true);
-  storedSSID = prefs.getString("ssid", "");
-  storedPASS = prefs.getString("pass", "");
+  lastGoodWiFiIndex = prefs.getUChar("lastgood", 0);
+  for (uint8_t i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    String validKey = "valid" + String(i);
+    String ssidKey = "ssid" + String(i);
+    String passKey = "pass" + String(i);
+    wifiValid[i] = prefs.getBool(validKey.c_str(), false);
+    storedSSID[i] = prefs.getString(ssidKey.c_str(), "");
+    storedPASS[i] = prefs.getString(passKey.c_str(), "");
+    if (!wifiValid[i] || storedSSID[i].length() == 0) {
+      wifiValid[i] = false;
+      storedSSID[i] = "";
+      storedPASS[i] = "";
+    }
+  }
   prefs.end();
-  Serial.println("Loaded SSID: " + storedSSID);
+
+  Serial.println("Loaded WiFi profiles:");
+  for (uint8_t i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    if (wifiValid[i]) {
+      Serial.print("  ");
+      Serial.print(i);
+      Serial.print(": ");
+      Serial.print(storedSSID[i]);
+      if (i == lastGoodWiFiIndex) Serial.print(" (last good)");
+      Serial.println();
+    }
+  }
+}
+
+void saveWiFiStore() {
+  prefs.begin("wifi", false);
+  prefs.putUChar("lastgood", lastGoodWiFiIndex);
+  for (uint8_t i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    String validKey = "valid" + String(i);
+    String ssidKey = "ssid" + String(i);
+    String passKey = "pass" + String(i);
+    prefs.putBool(validKey.c_str(), wifiValid[i]);
+    prefs.putString(ssidKey.c_str(), storedSSID[i]);
+    prefs.putString(passKey.c_str(), storedPASS[i]);
+  }
+  prefs.end();
 }
 
 // -------- Save new credentials --------
 void saveCredentials(String ssid, String pass) {
-  prefs.begin("wifi", false);
-  prefs.putString("ssid", ssid);
-  prefs.putString("pass", pass);
-  prefs.end();
-  Serial.println("Saved new WiFi credentials.");
+  ssid.trim();
+  if (ssid.length() == 0) return;
+
+  // Update existing SSID
+  for (uint8_t i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    if (wifiValid[i] && storedSSID[i] == ssid) {
+      storedPASS[i] = pass;
+      saveWiFiStore();
+      Serial.println("Updated WiFi credentials for SSID: " + ssid);
+      return;
+    }
+  }
+
+  // Save in empty slot
+  for (uint8_t i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    if (!wifiValid[i]) {
+      wifiValid[i] = true;
+      storedSSID[i] = ssid;
+      storedPASS[i] = pass;
+      saveWiFiStore();
+      Serial.println("Saved WiFi credentials in slot " + String(i) + ": " + ssid);
+      return;
+    }
+  }
+
+  // If full, overwrite next slot (round-robin)
+  static uint8_t rr = 0;
+  uint8_t idx = rr % MAX_WIFI_NETWORKS;
+  rr++;
+  wifiValid[idx] = true;
+  storedSSID[idx] = ssid;
+  storedPASS[idx] = pass;
+  saveWiFiStore();
+  Serial.println("WiFi list full. Overwrote slot " + String(idx) + " with SSID: " + ssid);
 }
 
 // -------- Captive Portal HTML --------
 void handleRoot() {
   String html = "<html><body>"
                 "<h2>ESP32 PLC WiFi Config</h2>"
+                "<p>Enter SSID/password to add or update a WiFi profile.</p>"
                 "<form action='/save' method='POST'>"
                 "SSID:<br><input name='ssid'><br>"
                 "Password:<br><input type='password' name='pass'><br><br>"
-                "<input type='submit' value='Save & Reboot'>"
-                "</form>"
-                "</body></html>";
+                "<input type='submit' value='Save'>"
+                "</form><hr><h3>Saved networks</h3><ul>";
+
+  for (uint8_t i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    if (wifiValid[i]) {
+      html += "<li>" + String(i) + ": " + storedSSID[i];
+      if (i == lastGoodWiFiIndex) html += " (last good)";
+      html += "</li>";
+    }
+  }
+
+  html += "</ul></body></html>";
   server.send(200, "text/html", html);
 }
 
 void handleSave() {
   saveCredentials(server.arg("ssid"), server.arg("pass"));
-  server.send(200, "text/html", "Saved. Rebooting...");
-  delay(800);
-  ESP.restart();
+  server.send(200, "text/html", "Saved. Device will keep trying networks automatically. You can close this page.");
 }
 
 // -------- Start AP Mode --------
@@ -100,19 +182,16 @@ void startConfigPortal() {
 }
 
 // -------- STA Connection Attempt --------
-bool tryConnectSTA() {
-  if (storedSSID.length() == 0) {
-    Serial.println("No saved SSID.");
-    return false;
-  }
+bool connectWiFiTo(const String& ssid, const String& pass) {
+  if (ssid.length() == 0) return false;
 
-  Serial.println("Trying WiFi: " + storedSSID);
+  WiFi.mode(inConfigPortal ? WIFI_AP_STA : WIFI_STA);
+  WiFi.begin(ssid.c_str(), pass.c_str());
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(storedSSID.c_str(), storedPASS.c_str());
+  Serial.println("Trying WiFi: " + ssid);
 
   unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
     delay(200);
     Serial.print(".");
   }
@@ -124,6 +203,46 @@ bool tryConnectSTA() {
 
   Serial.println("\nWiFi Failed.");
   return false;
+}
+
+bool connectWiFiAny() {
+  uint8_t validCount = 0;
+  for (uint8_t i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    if (wifiValid[i]) validCount++;
+  }
+
+  if (validCount == 0) {
+    Serial.println("No saved SSID profiles.");
+    return false;
+  }
+
+  uint8_t startIdx = lastGoodWiFiIndex;
+  for (uint8_t offset = 0; offset < MAX_WIFI_NETWORKS; offset++) {
+    uint8_t idx = (startIdx + offset) % MAX_WIFI_NETWORKS;
+    if (!wifiValid[idx]) continue;
+    if (connectWiFiTo(storedSSID[idx], storedPASS[idx])) {
+      lastGoodWiFiIndex = idx;
+      saveWiFiStore();
+      return true;
+    }
+  }
+  return false;
+}
+
+bool tryConnectSTA() { return connectWiFiAny(); }
+
+void initBlynkAndOta() {
+  Blynk.config(BLYNK_AUTH_TOKEN);
+  Blynk.connect();
+
+  if (!blynkOtaInitialized) {
+    ArduinoOTA.setHostname("esp32-plc");
+    ArduinoOTA.begin();
+    Serial.println("OTA Ready.");
+    blynkOtaInitialized = true;
+  }
+
+  Serial.println("WiFi MAC: " + WiFi.macAddress());
 }
 
 // =============================================================================
@@ -230,11 +349,7 @@ void setup() {
 
   // -------- Start Blynk + OTA ONLY WHEN CONNECTED --------
   if (WiFi.status() == WL_CONNECTED) {
-    Blynk.begin(BLYNK_AUTH_TOKEN, storedSSID.c_str(), storedPASS.c_str());
-    ArduinoOTA.setHostname("esp32-plc");
-    ArduinoOTA.begin();
-    Serial.println("OTA Ready.");
-    Serial.println("WiFi MAC: " + WiFi.macAddress());
+    initBlynkAndOta();
   } else {
     Serial.println("WiFi not connected. OTA unavailable until WiFi connects.");
   }
@@ -258,18 +373,14 @@ void loop() {
     server.handleClient();
     if (millis() - lastConnectAttempt > connectRetryInterval) {
       lastConnectAttempt = millis();
-      Serial.println("Retrying STA from AP...");
-      if (tryConnectSTA()) {
+      Serial.println("Portal mode: trying saved WiFi profiles...");
+      if (connectWiFiAny()) {
         Serial.println("WiFi OK! Closing AP.");
         WiFi.softAPdisconnect(true);
         inConfigPortal = false;
 
         // bring up Blynk + OTA
-        Blynk.config(BLYNK_AUTH_TOKEN);
-        Blynk.connect();
-
-        ArduinoOTA.setHostname("esp32-plc");
-        ArduinoOTA.begin();
+        initBlynkAndOta();
       }
     }
   }
@@ -656,9 +767,21 @@ void checkConnections() {
     if (millis() - lastWiFiAttempt > 5000) {
       lastWiFiAttempt = millis();
       Serial.println("WiFi lost. Attempting reconnect...");
-      if (storedSSID.length() > 0) WiFi.begin(storedSSID.c_str(), storedPASS.c_str());
+      if (connectWiFiAny()) {
+        wifiFailCount = 0;
+      } else if (!inConfigPortal) {
+        wifiFailCount++;
+        if (wifiFailCount >= WIFI_MAX_RETRIES) {
+          Serial.println("WiFi reconnection failed repeatedly. Opening config portal...");
+          startConfigPortal();
+          wifiFailCount = 0;
+        }
+      }
     }
+    return;
   }
+
+  wifiFailCount = 0;
 
   // Blynk reconnect (non-blocking)
   if (!Blynk.connected() && WiFi.status() == WL_CONNECTED) {
