@@ -50,6 +50,13 @@ unsigned long lastConnectAttempt = 0;
 const unsigned long connectRetryInterval = 10000;
 uint8_t wifiFailCount = 0;
 
+bool reconnectInProgress = false;
+uint8_t reconnectStartIdx = 0;
+uint8_t reconnectOffset = 0;
+uint8_t reconnectCurrentIdx = 0;
+unsigned long reconnectAttemptStarted = 0;
+const unsigned long reconnectAttemptTimeout = 10000;
+
 RTC_DATA_ATTR int bootCount = 0;
 unsigned long resetTimeWindow = 4000;
 
@@ -248,6 +255,59 @@ bool connectWiFiAny() {
     }
   }
   return false;
+}
+
+bool startReconnectAttempt(uint8_t idx) {
+  if (!wifiValid[idx] || storedSSID[idx].length() == 0) return false;
+
+  reconnectCurrentIdx = idx;
+  reconnectInProgress = true;
+  reconnectAttemptStarted = millis();
+
+  WiFi.mode(inConfigPortal ? WIFI_AP_STA : WIFI_STA);
+  WiFi.begin(storedSSID[idx].c_str(), storedPASS[idx].c_str());
+
+  Serial.println("Reconnect attempt started for slot " + String(idx) + ": " + storedSSID[idx]);
+  return true;
+}
+
+bool startNextReconnectAttempt() {
+  while (reconnectOffset < MAX_WIFI_NETWORKS) {
+    uint8_t idx = (reconnectStartIdx + reconnectOffset) % MAX_WIFI_NETWORKS;
+    reconnectOffset++;
+    if (startReconnectAttempt(idx)) return true;
+  }
+  reconnectInProgress = false;
+  return false;
+}
+
+void resetReconnectState() {
+  reconnectInProgress = false;
+  reconnectOffset = 0;
+  reconnectCurrentIdx = 0;
+  reconnectAttemptStarted = 0;
+}
+
+bool tryReconnectAnyNonBlocking() {
+  if (WiFi.status() == WL_CONNECTED) {
+    resetReconnectState();
+    return true;
+  }
+
+  if (reconnectInProgress) {
+    if (millis() - reconnectAttemptStarted >= reconnectAttemptTimeout) {
+      Serial.println("Reconnect attempt timed out for slot " + String(reconnectCurrentIdx));
+      WiFi.disconnect();
+      if (!startNextReconnectAttempt()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  reconnectStartIdx = lastGoodWiFiIndex;
+  reconnectOffset = 0;
+  return startNextReconnectAttempt();
 }
 
 bool tryConnectSTA() { return connectWiFiAny(); }
@@ -782,15 +842,26 @@ uint16_t calculateCRC(byte *array, byte len) {
 
 // -------------------------- Connectivity watchdog ----------------------
 void checkConnections() {
-  // WiFi auto-reconnect
+  // WiFi auto-reconnect (non-blocking)
   if (WiFi.status() != WL_CONNECTED) {
     static unsigned long lastWiFiAttempt = 0;
-    if (millis() - lastWiFiAttempt > 5000) {
+
+    if (!reconnectInProgress && millis() - lastWiFiAttempt > 5000) {
       lastWiFiAttempt = millis();
       Serial.println("WiFi lost. Attempting reconnect...");
-      if (connectWiFiAny()) {
-        wifiFailCount = 0;
-      } else if (!inConfigPortal) {
+      if (!tryReconnectAnyNonBlocking() && !inConfigPortal) {
+        wifiFailCount++;
+        if (wifiFailCount >= WIFI_MAX_RETRIES) {
+          Serial.println("WiFi reconnection failed repeatedly. Opening config portal...");
+          startConfigPortal();
+          wifiFailCount = 0;
+        }
+      }
+      return;
+    }
+
+    if (reconnectInProgress) {
+      if (!tryReconnectAnyNonBlocking() && !inConfigPortal) {
         wifiFailCount++;
         if (wifiFailCount >= WIFI_MAX_RETRIES) {
           Serial.println("WiFi reconnection failed repeatedly. Opening config portal...");
@@ -800,6 +871,14 @@ void checkConnections() {
       }
     }
     return;
+  }
+
+  if (reconnectInProgress) {
+    Serial.println("WiFi reconnected on slot " + String(reconnectCurrentIdx));
+    lastGoodWiFiIndex = reconnectCurrentIdx;
+    saveWiFiStore();
+    initBlynkAndOta();
+    resetReconnectState();
   }
 
   wifiFailCount = 0;
