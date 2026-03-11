@@ -10,7 +10,7 @@
 //  - Per-register scaling, batch helper, CRC, etc.
 //
 // Notes:
-//  - readInterval is 5s (good for POC). Increase if you want lower traffic.
+//  - Telemetry/Modbus read interval is configurable from Blynk V18.
 //  - You can adjust RS485_RECOVER_THRESHOLD to tune auto-recovery sensitivity.
 // =============================================================================
 
@@ -348,7 +348,9 @@ uint16_t reg_Iinv_R          = 25250;
 uint16_t reg_InvFreq         = 25253;
 
 unsigned long lastReadTime = 0;
-const unsigned long readInterval = 5000UL;
+const unsigned long DEFAULT_TELEMETRY_INTERVAL_SECONDS = 10UL;
+unsigned long telemetryIntervalSeconds = DEFAULT_TELEMETRY_INTERVAL_SECONDS;
+unsigned long telemetryIntervalMs = DEFAULT_TELEMETRY_INTERVAL_SECONDS * 1000UL;
 
 String regInput = "";
 String valInput = "";
@@ -387,6 +389,7 @@ float scaleRegister(uint16_t reg);
 void checkConnections();
 void rs485_reinit();
 void updateFansBasedOnTemps(float bmsTempC, float invTempC);
+bool isValidTelemetryInterval(int v);
 
 // =============================================================================
 //                                   SETUP
@@ -396,6 +399,7 @@ void setup() {
   Serial.begin(115200);
   Serial.println();
   Serial.println("=== ESS POC BOOT ===");
+  Serial.printf("[V18] Startup default telemetry interval = %lu sec (%lu ms)\n", telemetryIntervalSeconds, telemetryIntervalMs);
 
   // Start RS485 in half duplex (important for MAX485)
   RS485.begin(9600, HALFDUPLEX);
@@ -470,7 +474,7 @@ void loop() {
   checkConnections();
 
   // Only read registers on schedule (prevents bus flooding)
-  if (millis() - lastReadTime >= readInterval) {
+  if (millis() - lastReadTime >= telemetryIntervalMs) {
     // Read registers (with built-in retries & scaling)
     float battVoltage      = readModbusRegister(slaveID, reg_BMSVol);
     float battCurrent      = readModbusRegister(slaveID, reg_BMSCurr);
@@ -619,6 +623,29 @@ BLYNK_WRITE(V17) {
     // automatic behavior will be applied at next scheduled read (or immediately if you call updateFansBasedOnTemps manually)
     Serial.println("Manual override cleared; resuming automatic control on next sensor update.");
   }
+}
+
+// Telemetry interval (seconds) from Blynk menu
+BLYNK_WRITE(V18) {
+  int rawIntervalSec = param.asInt();
+  Serial.printf("[V18] Raw menu value: %d\n", rawIntervalSec);
+
+  if (isValidTelemetryInterval(rawIntervalSec)) {
+    telemetryIntervalSeconds = (unsigned long)rawIntervalSec;
+    telemetryIntervalMs = telemetryIntervalSeconds * 1000UL;
+    Serial.println("[V18] Accepted menu value.");
+  } else {
+    telemetryIntervalSeconds = DEFAULT_TELEMETRY_INTERVAL_SECONDS;
+    telemetryIntervalMs = DEFAULT_TELEMETRY_INTERVAL_SECONDS * 1000UL;
+    Serial.println("[V18] Rejected invalid/unexpected value. Falling back to default.");
+  }
+
+  Serial.printf("[V18] Active telemetry interval: %lu sec (%lu ms)\n", telemetryIntervalSeconds, telemetryIntervalMs);
+}
+
+BLYNK_CONNECTED() {
+  Serial.println("Blynk connected. Syncing V18 telemetry interval menu...");
+  Blynk.syncVirtual(V18);
 }
 
 // Manual register inputs - ignore initial empty push from Blynk
@@ -823,6 +850,10 @@ float scaleRegister(uint16_t reg) {
       return 0.1f;
   }
   return 1.0f;
+}
+
+bool isValidTelemetryInterval(int v) {
+  return (v == 5 || v == 10 || v == 15 || v == 20 || v == 30 || v == 60);
 }
 
 // -------------------------- CRC calc -----------------------------------
