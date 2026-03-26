@@ -107,15 +107,15 @@ Valid values:
 - `1` = reserved
 - `2` = force charge
 
-### 3) Fan manual override
+### 3) Emergency fan override (all fans ON fail-safe)
 
 ```json
 { "command": "set_fan_manual", "value": 1 }
 ```
 
 Valid values:
-- `0` = disable manual override (return to automatic logic)
-- `1` = enable manual override (force all fans ON)
+- `0` = disable override (return to automatic temperature logic)
+- `1` = enable emergency override (force all fans ON)
 
 ### 4) Telemetry interval (seconds)
 
@@ -124,6 +124,7 @@ Valid values:
 ```
 
 Valid values:
+- `5`, `10`, `15`, `20`, `30`, `60` (seconds)
 - `300` (5 minutes)
 - `600` (10 minutes)
 - `900` (15 minutes)

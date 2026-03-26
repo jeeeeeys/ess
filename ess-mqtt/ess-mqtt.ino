@@ -391,7 +391,7 @@ const int RS485_RECOVER_THRESHOLD = 6; // number of failed register reads before
 const int RS485_REINIT_DELAY_MS = 80;  // delay after re-init to allow bus settle
 
 // -------------------------- Fan control globals & thresholds ------------
-bool manualOverride = false; // manual override command (ON forces all fans)
+bool manualOverride = false; // emergency fan override (ON forces all fans)
 int fan1_state = LOW; // R1_1
 int fan2_state = LOW; // R1_2
 int fan3_state = LOW; // R1_3
@@ -943,7 +943,8 @@ float scaleRegister(uint16_t reg) {
 }
 
 bool isValidTelemetryInterval(int v) {
-  return (v == 300 || v == 600 || v == 900);
+  return (v == 5 || v == 10 || v == 15 || v == 20 || v == 30 || v == 60 ||
+          v == 300 || v == 600 || v == 900);
 }
 
 // -------------------------- CRC calc -----------------------------------
@@ -1021,7 +1022,7 @@ void checkConnections() {
 
 // -------------------------- Fan control function -------------------------
 void updateFansBasedOnTemps(float bmsTempC, float invTempC) {
-  // If manual override is active, fans are already forced ON by MQTT command handler.
+  // If emergency override is active, fans are forced ON by MQTT command handler.
   if (manualOverride) {
     fan1_state = fan2_state = fan3_state = HIGH;
     digitalWrite(R1_1, HIGH);
