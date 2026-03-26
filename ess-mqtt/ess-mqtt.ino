@@ -17,7 +17,6 @@
 #include <RS485.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
-#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
@@ -28,6 +27,13 @@
   #include "secrets.h"
 #else
   #error "Missing secrets.h. Create secrets.h with MQTT/TLS credentials."
+#endif
+
+#if MQTT_USE_TLS
+  #include <WiFiClientSecure.h>
+  using MqttTransportClient = WiFiClientSecure;
+#else
+  using MqttTransportClient = WiFiClient;
 #endif
 
 // =============================================================================
@@ -60,8 +66,8 @@ uint8_t reconnectCurrentIdx = 0;
 unsigned long reconnectAttemptStarted = 0;
 const unsigned long reconnectAttemptTimeout = 10000;
 
-WiFiClientSecure secureClient;
-PubSubClient mqtt(secureClient);
+MqttTransportClient mqttTransportClient;
+PubSubClient mqtt(mqttTransportClient);
 
 char deviceIdHex[13];
 char topicData[96];
@@ -335,12 +341,16 @@ void ensureOtaStarted() {
 }
 
 void initMqttSecurity() {
-#if defined(MQTT_USE_TLS) && MQTT_USE_TLS
-  secureClient.setCACert(AWS_ROOT_CA);
-#if defined(DEVICE_CERT) && defined(PRIVATE_KEY)
-  secureClient.setCertificate(DEVICE_CERT);
-  secureClient.setPrivateKey(PRIVATE_KEY);
-#endif
+#if MQTT_USE_TLS
+  mqttTransportClient.setCACert(AWS_ROOT_CA);
+  const bool hasDeviceCert = strlen(DEVICE_CERT) > 0;
+  const bool hasPrivateKey = strlen(PRIVATE_KEY) > 0;
+  if (hasDeviceCert && hasPrivateKey) {
+    mqttTransportClient.setCertificate(DEVICE_CERT);
+    mqttTransportClient.setPrivateKey(PRIVATE_KEY);
+  } else if (hasDeviceCert || hasPrivateKey) {
+    Serial.println("TLS warning: provide both DEVICE_CERT and PRIVATE_KEY for mTLS; using server-auth TLS only.");
+  }
 #endif
 }
 
